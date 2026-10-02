@@ -1,0 +1,56 @@
+# Local environments and generated files
+VAC/
+.venv/
+.runtime/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+credentials.json
+secrets.json
+*.pem
+*.key
+
+# Downloadable model weights and video output
+models/
+*.pt
+*.pth
+*.mp4
+*.m4v
+*.mov
+*.avi
+*.mkv
+*.wmv
+*.webm
+*.flv
+*.jsonl
+
+# Local evaluation artifacts
+development/
+input/
+inputs/
+dataset/
+datasets/
+results/
+temp/
+tmp/
+
+# Generated exports and diagnostics
+output/
+logs/
+*.log
+merged_starts.log
+event_debug.json
+debug_video.mp4

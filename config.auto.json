@@ -1,0 +1,17 @@
+{
+  "imgsz": 1280,
+  "pose_imgsz": 768,
+  "confidence": 0.18,
+  "max_players": 2,
+  "temporal": {
+    "action_gap": 3.0,
+    "rally_stitch_gap": 8.0,
+    "rally_stitch_evidence_gap": 3.0,
+    "reaction_backtrack": 0.6,
+    "terminal_flight": 0.8,
+    "end_confirm": 3,
+    "arm_threshold": 0.8,
+    "low_hand_arm_threshold": 1.2,
+    "pickup_confirm": 0.2
+  }
+}
