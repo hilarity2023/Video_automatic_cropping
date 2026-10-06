@@ -16,7 +16,79 @@ def samples(spans=(),length=30,pickup=False):
 
 
 class TemporalTests(unittest.TestCase):
-    def test_short_action_groups_are_stitched_before_duration_filtering(self):
+    def test_short_rallies_separated_by_pickup_never_become_a_long_export(self):
+        from auto_pipeline import Settings,plan_export_tails
+        from shuttle_endings import resolve_shuttle_endings
+        rows=samples([(2,5),(8,11),(14,17)],length=24)
+        for q in rows:
+            if 5.5<=q['t']<=6.5 or 11.5<=q['t']<=12.5:
+                q.update(bent=True,arm_speed=2.,foot_speed=.2,body_speed=.1)
+                q['keypoints'][9]=q['keypoints'][10]=[.5,.85,1.]
+        proposals=segment_actions(rows,pre_roll=5.)
+        merged=merge_action_proposals(proposals,rows)
+        self.assertEqual(len(merged),3)
+        records=resolve_shuttle_endings(merged,[],Settings(pre_roll=5.),24,True)
+        self.assertEqual(len(records),3)
+        self.assertTrue(all(r['status']=='too_short' for r in records))
+        plan_export_tails(records,10.,30.,24.)
+        self.assertTrue(all('planned_export_end' not in r for r in records))
+
+    def test_raw_pickup_blocks_merge_even_without_proposal_pickup_metadata(self):
+        first=dict(release=2.,start=0.,first_action=2.3,last_action=5.)
+        following=dict(release=7.,start=6.,first_action=7.3,last_action=10.)
+        rows=[dict(t=i/10,valid=True,players=[dict(valid=True,player_id=1,
+            bent=5.5<=i/10<=6.,overhead=True,arm_speed=2.,
+            foot_speed=.2,body_speed=.1,spread=.1)]) for i in range(51,73)]
+        self.assertEqual(len(merge_action_proposals([first,following],rows)),2)
+
+    def test_retrieval_with_fast_arm_motion_alone_is_rejected(self):
+        rows=samples([(5,18)],length=25,pickup=True)
+        for q in rows:
+            if 5<=q['t']<=18:q.update(arm_speed=3.,foot_speed=.3,body_speed=.1)
+        self.assertEqual(segment_actions(rows),[])
+
+    def test_supported_fragments_of_one_long_round_still_pass_duration_filter(self):
+        from auto_pipeline import Settings
+        from shuttle_endings import resolve_shuttle_endings
+        proposals=[dict(release=5.,start=2.5,first_action=5.3,last_action=10.),
+                   dict(release=12.,start=9.5,first_action=12.3,last_action=18.2)]
+        rows=[dict(t=t,valid=True,players=[dict(valid=True,player_id=1,
+            overhead=True,arm_speed=1.2,foot_speed=.1,body_speed=.1,spread=.1)])
+            for t in (10.6,10.8,11.2,11.6)]
+        merged=merge_action_proposals(proposals,rows)
+        self.assertEqual(len(merged),1)
+        r=resolve_shuttle_endings(merged,[],Settings(),25,True)[0]
+        self.assertEqual(r['status'],'keep')
+        self.assertGreater(r['qualifying_duration'],8.)
+
+    def test_recovered_head_stays_inside_video_and_analysis_scene(self):
+        for floor in (0.,100.):
+            with self.subTest(scene_start=floor):
+                proposal=dict(release=floor+5.06,start=floor+2.56,
+                              first_action=floor+5.06,last_action=floor+5.46,
+                              pre_roll_available=2.5)
+                rows=[dict(t=floor+t,valid=True,players=[dict(valid=True,
+                    player_id=player,overhead=True,arm_speed=1.2,
+                    foot_speed=.1,body_speed=.1,spread=.1)])
+                    for t,player in ((.8,1),(1.8,2),(3.2,2),(4.9,1))]
+                r=merge_action_proposals([proposal],rows,scene_start=floor)[0]
+                self.assertTrue(r['recovered_action_head'])
+                self.assertAlmostEqual(r['first_action'],floor+.8)
+                self.assertEqual(r['start'],floor)
+                self.assertGreaterEqual(r['release'],floor)
+                self.assertAlmostEqual(r['pre_roll_available'],r['release']-r['start'])
+
+    def test_serve_lead_in_at_video_start_never_has_negative_start(self):
+        first=dict(release=.2,start=0.,first_action=.5,last_action=.9)
+        following=dict(release=2.7,start=1.7,first_action=3.5,last_action=10.)
+        rows=[dict(t=t,valid=True,players=[dict(valid=True,player_id=1,
+            overhead=False,arm_speed=3.4,foot_speed=.3,body_speed=.12,spread=.1)])
+            for t in (.6,.7)]
+        merged=merge_action_proposals([first,following],rows)
+        self.assertEqual(len(merged),1)
+        self.assertEqual(merged[0]['start'],0.)
+
+    def test_short_action_groups_without_play_evidence_are_not_stitched(self):
         proposals=[dict(release=10.,start=9.,first_action=10.3,last_action=11.,
                         evidence_frames=5,retrieval_start=30.),
                    dict(release=13.2,start=12.2,first_action=13.5,last_action=14.5,
@@ -24,11 +96,11 @@ class TemporalTests(unittest.TestCase):
                    dict(release=15.7,start=14.7,first_action=16.,last_action=16.6,
                         evidence_frames=4,retrieval_start=30.)]
         merged=merge_action_proposals(proposals,[])
-        self.assertEqual(len(merged),1)
+        self.assertEqual(len(merged),3)
         self.assertEqual((merged[0]['release'],merged[0]['start']),(10.,9.))
-        self.assertEqual((merged[0]['first_action'],merged[0]['last_action']),(10.3,16.6))
+        self.assertEqual((merged[0]['first_action'],merged[0]['last_action']),(10.3,11.))
         self.assertEqual(merged[0]['retrieval_start'],30.)
-        self.assertEqual(merged[0]['evidence_frames'],14)
+        self.assertEqual(merged[0]['evidence_frames'],5)
 
     def test_retrieval_or_long_ready_pause_blocks_stitching(self):
         base=dict(release=10.,start=9.,first_action=10.3,last_action=11.)
@@ -45,6 +117,9 @@ class TemporalTests(unittest.TestCase):
         self.assertEqual(len(merge_action_proposals([first,following],[])),2)
         rows=[dict(t=14.+i*.1,valid=True,players=[dict(valid=True,overhead=True,arm_speed=1.)])
                for i in range(3)]
+        self.assertEqual(len(merge_action_proposals([first,following],rows)),2)
+        rows.extend(dict(t=t,valid=True,players=[dict(valid=True,overhead=True,arm_speed=1.)])
+                    for t in (16.,16.2))
         merged=merge_action_proposals([first,following],rows)
         self.assertEqual(len(merged),1)
         self.assertEqual(merged[0]['last_action'],20.)
@@ -54,7 +129,7 @@ class TemporalTests(unittest.TestCase):
 
     def test_short_low_serve_swing_seed_connects_to_following_rally(self):
         first=dict(release=10.5,start=8.,first_action=10.8,last_action=11.2)
-        following=dict(release=15.,start=14.,first_action=15.8,last_action=20.)
+        following=dict(release=13.,start=12.,first_action=13.8,last_action=20.)
         serve=[dict(t=t,valid=True,ball_held=False,players=[dict(valid=True,player_id=1,
             overhead=False,arm_speed=3.4,foot_speed=.3,body_speed=.12,spread=.1)])
             for t in (10.9,11.0)]
@@ -152,7 +227,7 @@ class TemporalTests(unittest.TestCase):
             if 14<=q['t']<=18:q.update(foot_speed=.6,body_speed=.4)
         r=segment_actions(rows)
         self.assertEqual(len(r),1)
-        self.assertEqual(r[0]['status'],'keep')
+        self.assertEqual(r[0]['status'],'too_short')
         self.assertLess(r[0]['end'],13)
         self.assertFalse(r[0]['landing_observed'])
 
@@ -174,7 +249,7 @@ class TemporalTests(unittest.TestCase):
         self.assertTrue(r[0]['needs_review'])
 
     def test_separate_rallies_and_filter_short_one(self):
-        r=segment_actions(samples([(5,11),(20,21)]))
+        r=segment_actions(samples([(5,14),(20,21)]))
         self.assertEqual([q['status'] for q in r],['keep','too_short'])
 
     def test_rest_and_pickup_do_not_make_rallies(self):
@@ -208,8 +283,9 @@ class TemporalTests(unittest.TestCase):
 
     def test_exact_threshold_and_just_under(self):
         data=samples([(5,11)])
-        duration=segment_actions(data)[0]['duration']
-        self.assertEqual(segment_actions(data,t_limit=duration)[0]['status'],'keep')
+        duration=segment_actions(data)[0]['qualifying_duration']
+        self.assertEqual(segment_actions(data,t_limit=duration-.01)[0]['status'],'keep')
+        self.assertEqual(segment_actions(data,t_limit=duration)[0]['status'],'too_short')
         self.assertEqual(segment_actions(data,t_limit=duration+.01)[0]['status'],'too_short')
 
     def test_broadcast_uses_sustained_preparation_before_weak_play(self):
@@ -224,7 +300,7 @@ class TemporalTests(unittest.TestCase):
         rows=samples([(5,11)],length=13)
         old=segment_actions(rows)[0]
         self.assertEqual(old['status'],'incomplete')
-        r=segment_actions(rows,broadcast=True,terminal_transition=True)[0]
+        r=segment_actions(rows,t_limit=0,broadcast=True,terminal_transition=True)[0]
         self.assertEqual(r['status'],'keep')
         self.assertEqual(r['end_confirmation'],'relaxed_player_then_non_play_view')
         self.assertFalse(r['landing_observed'])
@@ -357,13 +433,12 @@ class TemporalTests(unittest.TestCase):
         r=segment_actions(rows)[0]
         self.assertLess(r['last_action'],10)
 
-    def test_ambiguous_large_arm_walk_is_kept_for_recall(self):
+    def test_ambiguous_large_arm_walk_alone_is_rejected(self):
         rows=samples([(5,18)],length=25)
         for q in rows:
             if 5<=q['t']<=18:q.update(arm_speed=1.8,foot_speed=.9,body_speed=.5,overhead=False)
         records=segment_actions(rows)
-        self.assertEqual(len(records),1)
-        self.assertEqual(records[0]['start_confidence'],'uncertain')
+        self.assertEqual(records,[])
 
     def test_confirmed_ground_stop_splits_even_continuous_action_proposal(self):
         rows=samples([(5,20)],length=27)

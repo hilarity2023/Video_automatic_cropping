@@ -18,17 +18,19 @@ def simulate(release=4.0,flight=5.0,limit=8):
 class AutomaticTests(unittest.TestCase):
     def test_cli_defaults(self):
         a=build_parser().parse_args([])
-        self.assertEqual(a.input,DEFAULT_INPUT)
-        self.assertEqual(a.output,DEFAULT_OUTPUT)
+        from pathlib import Path
+        self.assertEqual(a.input,Path(DEFAULT_INPUT))
+        self.assertEqual(a.output,Path(DEFAULT_OUTPUT))
         from auto_pipeline import DEFAULT_END_SECONDS
         self.assertEqual(a.max_seconds,DEFAULT_END_SECONDS)
         self.assertFalse(a.dry_run)
     def test_whole_rally(self):
-        r=simulate().records[0]
+        r=simulate(flight=9).records[0]
         self.assertEqual(r['status'],'keep')
         self.assertAlmostEqual(r['start'],1)
-        self.assertAlmostEqual(r['end'],9)
-        self.assertAlmostEqual(r['duration'],8)
+        self.assertAlmostEqual(r['end'],13)
+        self.assertAlmostEqual(r['qualifying_duration'],9)
+        self.assertAlmostEqual(r['duration'],12)
     def test_under_eight_dropped(self):
         self.assertEqual(simulate(flight=4.8).records[0]['status'],'too_short')
     def test_start_clipped(self):
@@ -36,7 +38,7 @@ class AutomaticTests(unittest.TestCase):
         self.assertEqual(r['start'],0)
         self.assertEqual(r['status'],'too_short')
     def test_t_limit_override(self):
-        self.assertEqual(simulate(flight=4.8,limit=7).records[0]['status'],'keep')
+        self.assertEqual(simulate(flight=4.8,limit=4.5).records[0]['status'],'keep')
     def test_ball_far_from_hands_cannot_start_rally(self):
         e=Events(Settings())
         for i in range(100):

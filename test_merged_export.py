@@ -52,4 +52,13 @@ class MergedExportTests(unittest.TestCase):
     def test_no_empty_output(self):
         with self.assertRaises(ValueError):export_merged(Path('source'),Path('out'),[])
 
+    def test_invalid_interval_reports_index_and_boundaries_before_encoding(self):
+        cases=[([(5.,6.),(-.5,4.),(0.,1.)],r'#1: start=-0.5s, end=4.0s'),
+               ([(5.,6.),(2.,2.),(0.,1.)],r'#2: start=2.0s, end=2.0s')]
+        for intervals,message in cases:
+            with self.subTest(intervals=intervals),patch('auto_pipeline.export') as encoder:
+                with self.assertRaisesRegex(ValueError,message):
+                    export_merged(Path('source'),Path('out'),intervals)
+                encoder.assert_not_called()
+
 if __name__=='__main__':unittest.main()

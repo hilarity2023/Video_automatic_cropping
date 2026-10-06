@@ -4,6 +4,30 @@ from auto_pipeline import Ball,Settings
 from shuttle_endings import resolve_shuttle_endings,write_merged_start_log
 
 class ShuttleEndTests(unittest.TestCase):
+    def test_pre_roll_and_fallback_padding_cannot_promote_short_round(self):
+        c=Settings(pre_roll=5.,t_limit=8.,context_fallback_tail=3.)
+        proposal=dict(release=5.,start=0.,last_action=11.,recovered_action_head=True)
+        r=resolve_shuttle_endings([proposal],[],c,25,True)[0]
+        self.assertGreater(r['duration'],8.)
+        self.assertAlmostEqual(r['qualifying_duration'],6.8)
+        self.assertEqual(r['status'],'too_short')
+
+    def test_exact_eight_second_round_is_rejected_but_longer_round_survives(self):
+        from shuttle_endings import filter_rally_duration
+        for length,expected in ((7.99,'too_short'),(8.,'too_short'),(8.01,'keep')):
+            with self.subTest(length=length):
+                r=dict(release=10.,start=0.,end=10.+length)
+                filter_rally_duration(r,8.)
+                self.assertEqual(r['status'],expected)
+
+    def test_stationary_confirmation_wait_cannot_promote_short_round(self):
+        from shuttle_endings import filter_rally_duration
+        r=dict(release=0.,start=0.,end=8.4,stop_started_at=7.9,
+               end_confirmation='shuttle_stationary')
+        filter_rally_duration(r,8.)
+        self.assertEqual(r['status'],'too_short')
+        self.assertAlmostEqual(r['qualifying_duration'],7.9)
+
     def run_rows(self,points):
         c=Settings(t_limit=0,ground=((0,0),(1,0),(1,1),(0,1)))
         rows=[dict(t=t,balls=[] if x is None else [Ball(t,x,y)],wrists=[(.5,.5)]) for t,x,y in points]

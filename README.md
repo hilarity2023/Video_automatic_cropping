@@ -16,7 +16,7 @@
 
 ## 快速运行
 
-不带参数运行时，读取仓库目录下的 input.mp4，分析原视频 [0, 450) 秒，输出到 output/：
+不带参数运行时，读取仓库目录下的 input.mp4，分析原视频 [0, 11450) 秒，输出到 output/：
 
     & .\.venv\Scripts\python.exe badminton_cut.py
 
@@ -40,11 +40,11 @@ end-seconds 是原视频上的结束时间（不包含该秒），不是片段�
 | 输入 | 仓库下 input.mp4 | 推荐命令行传入视频路径；或修改默认文件名 | auto_pipeline.py：DEFAULT_INPUT、build_parser() |
 | 输出 | 仓库下 output/ | 可用 --output 指定 | auto_pipeline.py：DEFAULT_OUTPUT、build_parser() |
 | 分析起点 | 0 秒 | 跳过片头等无关区段：--start-seconds | auto_pipeline.py：DEFAULT_START_SECONDS |
-| 分析终点 | 450 秒 | 长视频需调大：--end-seconds；是原视频时间且右端不包含 | auto_pipeline.py：DEFAULT_END_SECONDS |
+| 分析终点 | 11450 秒 | 长视频需调大：--end-seconds；是原视频时间且右端不包含 | auto_pipeline.py：DEFAULT_END_SECONDS |
 | 标注参考时刻 | 12 秒 | 固定机位选球场和球员清楚的帧：--setup-seconds；不改变分析区间 | auto_pipeline.py：DEFAULT_SETUP_SECONDS |
 | pre-roll | 2.5 秒 | 估计开局前额外保留；固定机位用于发球准备；受分析起点限制 | Settings.pre_roll；--pre-roll |
 | post-roll | 2 秒 | 估计结束后额外保留；不计入最短时长，且受捡球和场景边界约束 | Settings.post_roll；--post-roll |
-| t-limit | 8 秒 | 最短保留时长；前滚计入、后滚不计入 | Settings.t_limit；--t-limit |
+| t-limit | 8 秒 | 实际回合必须超过此时长；前滚、后滚、结束确认等待及兜底延长均不计入；独立短回合不会靠拼接凑时长 | Settings.t_limit；--t-limit |
 | frame-stride | 基础值 5 帧 | 姿态分析每隔多少个源视频帧采样一次；越小越慢但瞬间动作漏检更少 | Settings.frame_stride；config.auto.json 或 --frame-stride |
 
 固定机位 context 模式在没有显式配置 frame-stride 时会自动改为 4。命令行或 config.auto.json 明确设置后则使用指定值；启动输出会显示最终值。

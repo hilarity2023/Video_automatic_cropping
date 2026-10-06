@@ -4,6 +4,37 @@ from unittest.mock import patch
 from auto_pipeline import ROOT,Settings,build_parser,load_settings,validate_window,analyse
 
 class ConfigurationTests(unittest.TestCase):
+    def test_automatic_pipeline_does_not_export_short_rounds_around_pickups(self):
+        import cv2,numpy as np
+        from test_temporal_events import samples
+        rows=samples([(2,5),(8,11),(14,17)],length=24)
+        for q in rows:
+            if 5.5<=q['t']<=6.5 or 11.5<=q['t']<=12.5:
+                q.update(bent=True,arm_speed=2.,foot_speed=.2,body_speed=.1)
+                q['keypoints'][9]=q['keypoints'][10]=[.5,.85,1.]
+        class FakeVision:
+            def __init__(self,*args):self.features=[];self.next_pose=0.
+            def infer(self,frame,t):
+                row=rows[min(round(t*10),len(rows)-1)]
+                self.features.append(dict(row,t=t))
+                return [],[]
+        with tempfile.TemporaryDirectory(dir=ROOT/'.runtime') as tmp:
+            source=Path(tmp)/'short_rounds.mp4'
+            writer=cv2.VideoWriter(str(source),cv2.VideoWriter_fourcc(*'mp4v'),10,(64,48))
+            self.assertTrue(writer.isOpened())
+            for _ in range(240):writer.write(np.full((48,64,3),127,np.uint8))
+            writer.release()
+            args=build_parser().parse_args([str(source),'-o',tmp,'--end-seconds','24',
+                '--frame-stride','1','--view-mode','fixed','--no-manual-setup',
+                '--pre-roll','5','--post-roll','10','--t-limit','8'])
+            with patch('auto_pipeline.Vision',FakeVision),patch('auto_pipeline.export_merged') as exporter:
+                report=analyse(args,load_settings(args))
+                exporter.assert_not_called()
+            self.assertEqual(report['merged_segment_count'],0)
+            self.assertEqual(len(report['segments']),3)
+            self.assertTrue(all(q['status']=='too_short' for q in report['segments']))
+            self.assertFalse(list(Path(tmp).rglob('highlights.mp4')))
+
     def test_project_uses_python_clip_defaults(self):
         args=build_parser().parse_args([])
         c=load_settings(args)

@@ -6,6 +6,54 @@ from dataclasses import dataclass
 import math
 import numpy as np
 
+
+def retrieval_pose(player):
+    """Low, leaning retrieval geometry; athletic wide lunges remain playable."""
+    if not player.get('valid'):return False
+    if (player.get('spread',0)>=.3 or player.get('body_speed',0)>=.65
+            or player.get('foot_speed',0)>=2.):return False
+    if player.get('bent',False):return True
+    pts=player.get('keypoints');box=player.get('box')
+    if pts is None or box is None:return False
+    height=max(box[3]-box[1],.01)
+    hips=[v for v in pts[11:13] if v[2]>.25]
+    shoulders=[v for v in pts[5:7] if v[2]>.25]
+    hands=[v for v in pts[9:11] if v[2]>.3]
+    if not hips or not hands:return False
+    hip_y=np.mean([v[1] for v in hips])
+    lowered=(max(v[1] for v in hands)-hip_y)/height
+    torso=player.get('torso')
+    leaning=bool(shoulders and
+        (hip_y-np.mean([v[1] for v in shoulders]))/height<.25 and
+        abs(np.mean([v[0] for v in shoulders])-np.mean([v[0] for v in hips]))/height>.09)
+    return bool((lowered>.22 and player.get('foot_speed',0)<.8) or
+                (lowered>.12 and torso is not None and torso<.23) or
+                (lowered>0 and leaning))
+
+
+def retrieval_frame(feature, settings):
+    players=feature.get('players') or [feature]
+    retrieving=any(retrieval_pose(p) for p in players)
+    competing=any(p.get('valid') and not retrieval_pose(p) and
+        ((p.get('overhead',False) and p.get('arm_speed',0)>settings.low_hand_arm_threshold
+          and p.get('foot_speed',0)>.8) or
+         (p.get('spread',0)>.3 and p.get('foot_speed',0)>1.2)) for p in players)
+    return retrieving and not competing
+
+
+def confirmed_retrieval_spans(features,settings):
+    if not features:return []
+    times=[q['t'] for q in features]
+    dt=float(np.median(np.diff(times))) if len(times)>1 else 0.
+    spans=[];run=[]
+    for q in list(features)+[None]:
+        if q is not None and retrieval_frame(q,settings):run.append(q['t'])
+        else:
+            if run and run[-1]-run[0]+dt+1e-9>=settings.pickup_confirm:
+                spans.append((run[0],run[-1]))
+            run=[]
+    return spans
+
 @dataclass
 class TemporalSettings:
     smooth_seconds: float = .4
@@ -107,29 +155,7 @@ def segment_actions(features, pre_roll=3., t_limit=8., settings=None,
     # Inspect every identity: fusion may select the standing player's wrist motion
     # while another player is retrieving. Missing identities are not pickup evidence.
     for k,q in enumerate(features):
-        players=[p for p in q.get('players',[]) if p.get('valid')]
-        def retrieval_pose(p):
-            pts=np.asarray(p['keypoints']);height=max(p['box'][3]-p['box'][1],.01)
-            hips=[v[1] for v in pts[11:13] if v[2]>.25]
-            hip_x=[v[0] for v in pts[11:13] if v[2]>.25]
-            shoulder_pts=[v for v in pts[5:7] if v[2]>.25]
-            shoulders=[v[0] for v in shoulder_pts]
-            hands=[v[1] for v in pts[9:11] if v[2]>.3]
-            lowered=bool(hips and hands and (max(hands)-np.mean(hips))/height>.12)
-            torso=p.get('torso')
-            leaning=p.get('bent',False) or (torso is not None and torso<.23 and lowered) or bool(
-                hips and hip_x and shoulders and hands
-                and (np.mean(hips)-np.mean([v[1] for v in shoulder_pts]))/height<.25
-                and abs(np.mean(shoulders)-np.mean(hip_x))/height>.09
-                and (max(hands)-np.mean(hips))/height>0)
-            return (leaning and p.get('spread',0)<.3 and p.get('body_speed',0)<.65
-                    and p.get('foot_speed',0)<2.)
-        retrieving=any(retrieval_pose(p) for p in players)
-        competing_play=any(not p.get('bent',False) and
-            ((p.get('overhead',False) and p.get('arm_speed',0)>c.low_hand_arm_threshold
-              and p.get('foot_speed',0)>.8) or
-             (p.get('spread',0)>.3 and p.get('foot_speed',0)>1.2)) for p in players)
-        if retrieving and not competing_play:pickup_pose[k]=True
+        if retrieval_frame(q,c):pickup_pose[k]=True
     pickup=np.zeros(len(t),dtype=bool);pickup_spans=[]
     run=[]
     for k in range(len(t)+1):
@@ -201,15 +227,16 @@ def segment_actions(features, pre_roll=3., t_limit=8., settings=None,
                 else:rest_run=0.
             allowance=c.action_gap+gap_allowance+(0 if clear_rest else min(unseen,c.occlusion_bridge))
             # Only missing observations earn extra time; real rest/pickup never does.
-            split=t[i]-t[previous]>allowance or np.any(pickup[previous:i]) or np.any(exit_barriers[previous:i]) or any(t[previous]<v<=t[i] for v in stop_times)
+            split=(t[i]-t[previous]>allowance or np.any(pickup[previous:i])
+                   or np.any(exit_barriers[previous:i]) or any(t[previous]<v<=t[i] for v in stop_times))
         if split:groups.append([])
         groups[-1].append(i)
     records=[]
     end_of_data=min(float(t[-1]),scene_end) if scene_end is not None else float(t[-1])
     for group in groups:
         # A walking-looking opening followed by a distinct stroke belongs to
-        # the preparation for that stroke, not to the preceding rally. Keep a
-        # wholly ambiguous group for recall, as requested by the user.
+        # the preparation for that stroke, not to the preceding rally. A group
+        # consisting only of ambiguous raised-hand walking is rejected below.
         if walk_like[group[0]]:
             first_clear=next((n for n,z in enumerate(group) if clear_stroke[z]),None)
             if first_clear is not None and first_clear>0:
@@ -236,10 +263,10 @@ def segment_actions(features, pre_roll=3., t_limit=8., settings=None,
                      and not features[z].get('overhead',False))
             if not walking and stroke_support[z]:break
             if walk_like[z]:
-                # Keep a plausible but unresolved opening, as requested, and
-                # surface it for review instead of silently calling it a stroke.
-                uncertain_head=True
-                break
+                # Raised-hand walking alone must not create a playable rally.
+                if not any(clear_stroke[v] for v in group):group=[];break
+                group=group[1:]
+                continue
             group=group[1:]
         if not group:continue
         i,j=group[0],group[-1]
@@ -311,15 +338,16 @@ def segment_actions(features, pre_roll=3., t_limit=8., settings=None,
                                    else 'subsequent_no_action_context')
             duration=end-start
             r.update(landing=end,end=end,duration=duration,
-                     status='keep' if duration+1e-9>=t_limit else 'too_short',
-                     near_duration_threshold=abs(duration-t_limit)<=1.,
                      evidence='raised_wrist_motion_or_lunge; '+r['end_confirmation'])
+            from shuttle_endings import filter_rally_duration
+            filter_rally_duration(r,t_limit,c.terminal_flight)
+            r['near_duration_threshold']=abs(r['qualifying_duration']-t_limit)<=1.
         records.append(r)
     return records
 
 
-def merge_action_proposals(proposals,features,settings=None):
-    """Join short action groups from one rally before minimum-duration filtering.
+def merge_action_proposals(proposals,features,settings=None,scene_start=0.):
+    """Join action fragments only across positively supported ongoing play.
 
     A confirmed retrieval, grounded shuttle stop, or sustained all-player ready
     pose is a hard boundary. The shuttle resolver still determines the final end.
@@ -329,6 +357,10 @@ def merge_action_proposals(proposals,features,settings=None):
     if not ordered:return []
     times=np.array([q['t'] for q in features],float) if features else np.array([],float)
     dt=float(np.median(np.diff(times))) if len(times)>1 else 1/12
+    retrieval_spans=confirmed_retrieval_spans(features,c)
+
+    def pickup_between(begin,end):
+        return any(left<end and right>begin for left,right in retrieval_spans)
 
     def settled_between(begin,end):
         if end<=begin or not len(times):return False
@@ -348,7 +380,7 @@ def merge_action_proposals(proposals,features,settings=None):
             if not begin<q['t']<end or not q.get('valid') or q.get('ball_held',False):continue
             players=q.get('players') or [q]
             for p in players:
-                if not p.get('valid') or p.get('bent',False):continue
+                if not p.get('valid') or p.get('bent',False) or retrieval_pose(p):continue
                 arm=p.get('arm_speed',0);foot=p.get('foot_speed',0)
                 body=p.get('body_speed',0);spread=p.get('spread',0)
                 walk_like=body>.2 and foot>.3 and spread<.25
@@ -377,14 +409,9 @@ def merge_action_proposals(proposals,features,settings=None):
                        for left,right in zip(sorted(set(times)),sorted(set(times))[1:]))
                    for times in by_player.values())
 
-    def active_between(begin,end):
-        events=action_events(begin,end)
-        cues=sorted(set(t for t,_,kind,strong in events
-                        if strong and kind!='serve_swing'))
-        return len(cues)>=2 and cues[-1]-cues[0]>=.1
-
     resolved_keys=('end','landing','duration','status','end_confirmation','end_confirmed_at',
-                   'evidence','reason','observed_until','end_uncertain','pose_tail_capped')
+                   'evidence','reason','observed_until','end_uncertain','pose_tail_capped',
+                   'qualifying_duration')
 
     def clear_resolution(proposal):
         for key in resolved_keys:proposal.pop(key,None)
@@ -406,12 +433,13 @@ def merge_action_proposals(proposals,features,settings=None):
         if pre_roll<.5:return
         begin=first-c.rally_stitch_gap
         barriers=[]
+        barriers.extend(end+c.pickup_recovery for begin,end in retrieval_spans if end<first)
         if previous is not None:
             for key in ('retrieval_start','ground_stop_time'):
                 if previous.get(key) is not None:
                     boundary=float(previous[key])
                     if boundary<=first:barriers.append(boundary)
-        floor=max(barriers,default=begin)
+        floor=max([scene_start]+barriers)
         events=[event for event in action_events(max(begin,floor),last+dt)
                 if event[2]!='serve_swing']
         # Keep only the final cue cluster close to the short proposal. Walking
@@ -434,11 +462,11 @@ def merge_action_proposals(proposals,features,settings=None):
         if not any(event[2]=='lunge' for event in strong) and len(strong_players)<2:return
         cue_start=min(event[0] for event in cluster)
         if any(cue_start<boundary<=first for boundary in barriers):return
-        release=min(float(proposal['release']),cue_start-max(c.serve_backtrack,.8))
-        start=min(float(proposal.get('start',proposal['release'])),release-pre_roll)
+        release=max(floor,min(float(proposal['release']),cue_start-max(c.serve_backtrack,.8)))
+        start=max(floor,min(float(proposal.get('start',proposal['release'])),release-pre_roll))
         if cue_start>=first:return
         proposal.update(first_action=cue_start,release=release,start=start,
-                        pre_roll_available=max(pre_roll,release-start),
+                        pre_roll_available=max(0.,release-start),
                         evidence_frames=int(proposal.get('evidence_frames',0))+len(strong_times),
                         recovered_action_head=True)
         clear_resolution(proposal)
@@ -446,6 +474,8 @@ def merge_action_proposals(proposals,features,settings=None):
     def extend_last_action(proposal,limit):
         last=float(proposal.get('last_action',proposal.get('first_action',proposal['release'])))
         end=min(float(limit),last+c.action_gap)
+        for begin,finish in retrieval_spans:
+            if finish>=last:end=min(end,max(last,begin))
         retrieval=proposal.get('retrieval_start')
         if retrieval is not None and float(retrieval)>last:end=min(end,float(retrieval))
         cues=action_cues(last,end)
@@ -472,6 +502,7 @@ def merge_action_proposals(proposals,features,settings=None):
         stop=previous.get('ground_stop_time')
         barrier=((retrieval is not None and previous_last<retrieval<=current_first) or
                  (stop is not None and previous_last<stop<=current_first) or
+                 pickup_between(previous_last,current_first) or
                  settled_between(previous_last,current_first))
         gap=current_first-previous_last
         previous_first=float(previous.get('first_action',previous['release']))
@@ -479,14 +510,19 @@ def merge_action_proposals(proposals,features,settings=None):
         serve_lead_in=(previous_last-previous_first<=.75 and
             current_last-current_first>=1.5 and
             has_serve_burst(action_events(previous_first,current_first)))
-        unobserved_long_gap=(gap>c.rally_stitch_evidence_gap and
-            not active_between(previous_last,current_first) and not serve_lead_in)
-        if gap>c.rally_stitch_gap or barrier or unobserved_long_gap:
+        # Small sampling gaps and a short observed serve flight can be bridged.
+        # Larger gaps need continuous action support; elapsed time alone is not play.
+        cue_times=action_cues(previous_last,current_first)
+        supported_gap=(len(cue_times)>=2 and
+            max(np.diff([previous_last]+cue_times+[current_first]))<=c.rally_stitch_evidence_gap)
+        supported_serve=serve_lead_in and gap<=c.rally_stitch_evidence_gap
+        unsupported_gap=(gap>max(c.terminal_flight+.2,2*dt) and not supported_gap and not supported_serve)
+        if gap>c.rally_stitch_gap or barrier or unsupported_gap:
             merged.append(current);continue
 
         latest=float(current.get('last_action',current_first))
         current_last=float(current.get('last_action',current_first))
-        previous_start=(float(previous['release'])-.5 if serve_lead_in else
+        previous_start=(max(scene_start,float(previous['release'])-.5) if serve_lead_in else
                         float(previous.get('start',previous['release'])))
         previous.update(start=min(previous_start,
                                   float(current.get('start',current['release']))),
@@ -507,6 +543,9 @@ def merge_action_proposals(proposals,features,settings=None):
         else:previous.pop('ground_stop_time',None)
     if merged:
         extend_last_action(merged[-1],float('inf'))
+    for proposal in merged:
+        proposal['release']=max(scene_start,float(proposal['release']))
+        proposal['start']=max(scene_start,float(proposal.get('start',proposal['release'])))
     return merged
 
 

@@ -20,7 +20,7 @@ os.environ.setdefault('YOLO_CONFIG_DIR', str(ROOT / '.runtime' / 'yolo_config'))
 
 DEFAULT_INPUT = ROOT / 'input.mp4'
 DEFAULT_START_SECONDS = 0.0
-DEFAULT_END_SECONDS = 450.0
+DEFAULT_END_SECONDS = 11450.0
 DEFAULT_SETUP_SECONDS = 12.0  # 人工标注使用原视频第几秒的画面；不改变分析起止时间；最好选一个球和人都在画面内的时间
 DEFAULT_OUTPUT = ROOT / 'output'
 
@@ -29,8 +29,8 @@ DEFAULT_OUTPUT = ROOT / 'output'
 class Settings:
     # 主要参数
     post_roll: float = 2.0  # 导出时在估计结束后额外保留的时间（秒）；不计入 t_limit 的时长筛选，可能受捡球/边界限制
-    pre_roll: float = 2.5  # 固定机位多留发球准备时间；受分析起点限制，计入片段筛选时长
-    t_limit: float = 8.0  # 最短有效片段时长（秒）；含可用前滚，不含后滚及自适应片尾延长，低于此值不保存
+    pre_roll: float = 2.5  # 固定机位多留发球准备时间；受分析起点限制，不计入回合时长筛选
+    t_limit: float = 8.0  # 实际回合必须超过此时长（秒）；前滚、后滚及兜底延长均不计入
     frame_stride: int = 5  # 每隔多少个原视频帧检测一次；越大越快，但更容易漏掉瞬间动作（不改变输出视频帧率）
 
     # 默认 context 模式按球员动作分段；标注“严格模式”的参数用于 --mode strict 的羽毛球事件判定。
@@ -200,9 +200,11 @@ class Events:
                     start=max(self.scene_start,self.release-c.pre_roll,0.0)
                     end=self.rest_since
                     self.records.append(dict(release=self.release,landing=end,start=start,end=end,
-                        duration=end-start,status='keep' if end-start+1e-9>=c.t_limit else 'too_short',
+                        duration=end-start,
                         evidence='shuttle_near_wrist_then_departure; descent_then_ground_rest',
                         pre_roll_available=self.release-start))
+                    from shuttle_endings import filter_rally_duration
+                    filter_rally_duration(self.records[-1],c.t_limit)
                     self.clear()
         else:self.rest_since=None;self.rest_anchor=None
         return p
@@ -334,9 +336,10 @@ def export_merged(source,target,intervals):
     import cv2
     intervals=sorted(intervals)
     if not intervals:raise ValueError('No intervals to merge')
-    for start,end in intervals:
+    for index,(start,end) in enumerate(intervals,1):
         if not math.isfinite(start) or not math.isfinite(end) or start<0 or end<=start:
-            raise ValueError('Invalid export interval')
+            raise ValueError(f'Invalid export interval #{index}: start={start!r}s, end={end!r}s; '
+                             'expected finite values with 0 <= start < end')
     tmp=target.with_suffix('.partial.mp4')
     try:
         with tempfile.TemporaryDirectory(prefix='.merge_',dir=target.parent) as scratch:
@@ -540,13 +543,15 @@ def analyse(args,c):
             from temporal_events import merge_action_proposals,TemporalSettings
             candidates=merge_action_proposals(candidates,
                 [q for q in gated_features if left<=q['t']<right],
-                TemporalSettings(**args.temporal_settings))
+                TemporalSettings(**args.temporal_settings),
+                scene_start=args.start_seconds if broadcast else left)
         rows=[q for q in shuttle_samples if left<=q['t']<right]
         # Each camera scene uses the court actually annotated for that scene.
         from dataclasses import replace
         scene_annotation=next((a for a in reversed(annotations) if a.get('frame_time',0)<=left+.1),annotations[0] if annotations else None)
         scene_c=replace(c,ground=tuple(tuple(p) for p in scene_annotation['court'])) if scene_annotation else c
-        engine.records.extend(resolve_shuttle_endings(candidates,rows,scene_c,min(right,last_analyzed+1/fps),allow_pickup_fallback=args.mode=='context'))
+        engine.records.extend(resolve_shuttle_endings(candidates,rows,scene_c,min(right,last_analyzed+1/fps),
+            allow_pickup_fallback=args.mode=='context',terminal_flight=args.temporal_settings.get('terminal_flight',.8)))
     report=dict(source=str(args.input.resolve()),analysis_limit=args.max_seconds,analysis_start=args.start_seconds,analysis_end=args.max_seconds,
         last_analyzed=last_analyzed,sampled_frames=count,frames_with_shuttle=ball_frames,
         elapsed_analysis_seconds=time.perf_counter()-started,source_fps=fps,frame_stride=c.frame_stride,
@@ -615,14 +620,14 @@ def analyse(args,c):
             if r.get('start_confidence')=='uncertain':flags.append('start=uncertain')
             if r.get('end_uncertain'):flags.append('end=unconfirmed')
             suffix=('; review='+','.join(flags)) if flags else ''
-            print(f"  export={r['start']:.3f}-{r['planned_export_end']:.3f}s; estimated_end={r['end']:.3f}s; qualifying_duration={r['duration']:.3f}s; tail={r['post_roll_available']:.3f}s; adaptive_extension={r.get('tail_guard_extension',0):.3f}s{suffix}",flush=True)
+            print(f"  export={r['start']:.3f}-{r['planned_export_end']:.3f}s; estimated_end={r['end']:.3f}s; qualifying_duration={r['qualifying_duration']:.3f}s; tail={r['post_roll_available']:.3f}s; adaptive_extension={r.get('tail_guard_extension',0):.3f}s{suffix}",flush=True)
     if not any(r['status']=='keep' for r in engine.records):
         print('No candidate passed duration/completeness checks.',flush=True)
     return report
 
 
 def build_parser():
-    p=argparse.ArgumentParser(description='羽毛球自动回合检测与剪辑；默认分析原视频 [0,450) 秒')
+    p=argparse.ArgumentParser(description='羽毛球自动回合检测与剪辑；默认分析原视频 [0,11450) 秒')
     p.add_argument('input',nargs='?',type=Path,default=DEFAULT_INPUT)
     p.add_argument('-o','--output',type=Path,default=DEFAULT_OUTPUT)
     p.add_argument('--start-seconds',type=float,default=DEFAULT_START_SECONDS,help='Original video start time in seconds')

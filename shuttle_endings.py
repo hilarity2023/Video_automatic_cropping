@@ -26,7 +26,23 @@ def pose_active(feature,c):
     return False
 
 
-def resolve_shuttle_endings(proposals, samples, c, scene_end, allow_pickup_fallback=False):
+def filter_rally_duration(record, t_limit, terminal_flight=.8):
+    """Filter playing time, never pre-roll, confirmation wait, or export padding."""
+    if 'end' not in record:return
+    end=record['end']
+    reason=record.get('end_confirmation','')
+    if reason=='shuttle_stationary' and record.get('stop_started_at') is not None:
+        end=min(end,record['stop_started_at'])
+    if reason in {'pose_confirmed_retrieval','pose_tail_cap_without_confirmed_shuttle_end',
+                  'sustained_retrieval_pose','subsequent_no_action_context',
+                  'relaxed_player_then_non_play_view'} and 'last_action' in record:
+        end=min(end,record['last_action']+terminal_flight)
+    record['qualifying_duration']=max(0.,end-record['release'])
+    record['status']='keep' if record['qualifying_duration']>t_limit+1e-9 else 'too_short'
+
+
+def resolve_shuttle_endings(proposals, samples, c, scene_end, allow_pickup_fallback=False,
+                            terminal_flight=.8):
     results=[];consumed_until=-math.inf
     ordered=sorted(proposals,key=lambda q:q.get('release',math.inf))
     for index,proposal in enumerate(ordered):
@@ -43,7 +59,7 @@ def resolve_shuttle_endings(proposals, samples, c, scene_end, allow_pickup_fallb
             search_end=min(search_end,retrieval+c.shuttle_stop_seconds+1e-6)
         r={k:v for k,v in proposal.items() if k not in {
             'end','landing','duration','status','end_confirmation','evidence',
-            'reason','observed_until','planned_export_end','export_duration'}}
+            'reason','observed_until','planned_export_end','export_duration','qualifying_duration'}}
         r.update(start=start,boundary_method='player_start_shuttle_end',landing_observed=False,needs_review=True)
         last=None;previous=None;anchor=None;moving=False;rest=None;rest_time=None;end=None;reason=None
         rest_ground=None
@@ -158,7 +174,6 @@ def resolve_shuttle_endings(proposals, samples, c, scene_end, allow_pickup_fallb
             if fallback_end>release:
                 end=fallback_end;reason='pose_tail_cap_without_confirmed_shuttle_end'
                 r.update(end=end,duration=end-start,
-                         status='keep' if end-start+1e-9>=c.t_limit else 'too_short',
                          end_confirmation=reason,evidence='no_confirmed_shuttle_stop_or_exit',
                          end_uncertain=True,needs_review=True,
                          observed_until=fallback_end,pose_tail_capped=True)
@@ -170,10 +185,11 @@ def resolve_shuttle_endings(proposals, samples, c, scene_end, allow_pickup_fallb
             r.update(status='incomplete',observed_until=search_end,reason='no_confirmed_shuttle_stop_or_exit_in_rally_window')
         else:
             consumed_until=end
-            r.update(end=end,duration=end-start,status='keep' if end-start+1e-9>=c.t_limit else 'too_short',
+            r.update(end=end,duration=end-start,
                      end_confirmation=reason,end_confirmed_at=end,evidence=reason,
                      stop_started_at=rest_time if reason=='shuttle_stationary' else None,
                      last_shuttle_seen=last.t if last else None)
+        filter_rally_duration(r,c.t_limit,terminal_flight)
         results.append(r)
     return results
 
