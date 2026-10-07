@@ -105,9 +105,3 @@ analysis_fps、pose_fps、pose_confidence 和旧版 players 区域是兼容字�
     & .\.venv\Scripts\python.exe -m unittest discover -s . -p "test_*.py" -v
 
 测试使用合成图像、姿态和短视频，不依赖个人比赛视频；临时数据会自动清理。
-
-## 隐私检查
-
-原视频、模型、虚拟环境、运行输出、调试 JSON 和本地开发资料均应留在本机；.gitignore 已排除这些类型。merged_starts.log 含回合时间点，event_debug.json 还含逐采样点的姿态证据，分享前先检查。不要提交令牌、密码、个人视频或人工标注样本。
-
-公开前还要检查 Git 提交历史：修改当前文件不会清除旧提交中的本机路径或提交者邮箱。
